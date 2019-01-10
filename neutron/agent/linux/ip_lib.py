@@ -123,7 +123,24 @@ class IPWrapper(SubProcessBase):
     def device(self, name):
         return IPDevice(name, namespace=self.namespace)
 
+<<<<<<< HEAD
     def get_devices(self, exclude_loopback=True, exclude_gre_devices=True):
+=======
+    def get_devices_info(self, exclude_loopback=True,
+                         exclude_fb_tun_devices=True):
+        devices = get_devices_info(self.namespace)
+
+        retval = []
+        for device in devices:
+            if (exclude_loopback and device['name'] == LOOPBACK_DEVNAME or
+                    exclude_fb_tun_devices and
+                    device['name'] in FB_TUNNEL_DEVICE_NAMES):
+                continue
+            retval.append(device)
+        return retval
+
+    def get_devices(self, exclude_loopback=True, exclude_fb_tun_devices=True):
+>>>>>>> e7a2b6d179... Add IPWrapper.get_devices_info using PyRoute2
         retval = []
         if self.namespace:
             # we call out manually because in order to avoid screen scraping
@@ -1347,3 +1364,230 @@ def get_ipv6_forwarding(device, namespace=None):
     cmd = ['sysctl', '-b', "net.ipv6.conf.%s.forwarding" % device]
     ip_wrapper = IPWrapper(namespace)
     return int(ip_wrapper.netns.execute(cmd, run_as_root=True))
+<<<<<<< HEAD
+=======
+
+
+def _parse_ip_rule(rule, ip_version):
+    """Parse a pyroute2 rule and returns a dictionary
+
+    Parameters contained in the returned dictionary:
+    - priority: rule priority
+    - from: source IP address
+    - to: (optional) destination IP address
+    - type: rule type (see RULE_TYPES)
+    - table: table name or number (see RULE_TABLES)
+    - fwmark: (optional) FW mark
+    - iif: (optional) input interface name
+    - oif: (optional) output interface name
+
+     :param rule: pyroute2 rule dictionary
+     :param ip_version: IP version (4, 6)
+     :return: dictionary with IP rule information
+    """
+    parsed_rule = {'priority': str(rule['attrs'].get('FRA_PRIORITY', 0))}
+    from_ip = rule['attrs'].get('FRA_SRC')
+    if from_ip:
+        parsed_rule['from'] = common_utils.ip_to_cidr(
+            from_ip, prefix=rule['src_len'])
+        if common_utils.is_cidr_host(parsed_rule['from']):
+            parsed_rule['from'] = common_utils.cidr_to_ip(parsed_rule['from'])
+    else:
+        parsed_rule['from'] = constants.IP_ANY[ip_version]
+    to_ip = rule['attrs'].get('FRA_DST')
+    if to_ip:
+        parsed_rule['to'] = common_utils.ip_to_cidr(
+            to_ip, prefix=rule['dst_len'])
+        if common_utils.is_cidr_host(parsed_rule['to']):
+            parsed_rule['to'] = common_utils.cidr_to_ip(parsed_rule['to'])
+    parsed_rule['type'] = IP_RULE_TYPES[rule['action']]
+    table_num = rule['attrs']['FRA_TABLE']
+    for table_name in (name for (name, index) in
+                       IP_RULE_TABLES.items() if index == table_num):
+        parsed_rule['table'] = table_name
+        break
+    else:
+        parsed_rule['table'] = str(table_num)
+    fwmark = rule['attrs'].get('FRA_FWMARK')
+    if fwmark:
+        fwmask = rule['attrs'].get('FRA_FWMASK')
+        parsed_rule['fwmark'] = '{0:#x}/{1:#x}'.format(fwmark, fwmask)
+    iifname = rule['attrs'].get('FRA_IIFNAME')
+    if iifname:
+        parsed_rule['iif'] = iifname
+    oifname = rule['attrs'].get('FRA_OIFNAME')
+    if oifname:
+        parsed_rule['oif'] = oifname
+
+    return parsed_rule
+
+
+def list_ip_rules(namespace, ip_version):
+    """List all IP rules in a namespace
+
+    :param namespace: namespace name
+    :param ip_version: IP version (4, 6)
+    :return: list of dictionaries with the rules information
+    """
+    rules = privileged.list_ip_rules(namespace, ip_version)
+    return [_parse_ip_rule(rule, ip_version) for rule in rules]
+
+
+def _make_pyroute2_args(ip, iif, table, priority, to):
+    """Returns a dictionary of arguments to be used in pyroute rule commands
+
+    :param ip: (string) source IP or CIDR address (IPv4, IPv6)
+    :param iif: (string) input interface name
+    :param table: (string, int) table number (as an int or a string) or table
+                  name ('default', 'main', 'local')
+    :param priority: (string, int) rule priority
+    :param to: (string) destination IP or CIDR address (IPv4, IPv6)
+    :return: a dictionary with the kwargs needed in pyroute rule commands
+    """
+    ip_version = common_utils.get_ip_version(ip)
+    # In case we need to add a rule based on an incoming interface, no
+    # IP address is given; the rule default source ("from") address is
+    # "all".
+    cmd_args = {'family': common_utils.get_socket_address_family(ip_version)}
+    if iif:
+        cmd_args['iifname'] = iif
+    else:
+        cmd_args['src'] = common_utils.cidr_to_ip(ip)
+        cmd_args['src_len'] = common_utils.cidr_mask(ip)
+    if to:
+        cmd_args['dst'] = common_utils.cidr_to_ip(to)
+        cmd_args['dst_len'] = common_utils.cidr_mask(to)
+    if table:
+        cmd_args['table'] = IP_RULE_TABLES.get(table) or int(table)
+    if priority:
+        cmd_args['priority'] = int(priority)
+    return cmd_args
+
+
+def _exist_ip_rule(rules, ip, iif, table, priority, to):
+    """Check if any rule matches the conditions"""
+    for rule in rules:
+        if iif and rule.get('iif') != iif:
+            continue
+        if not iif and rule['from'] != ip:
+            continue
+        if table and rule.get('table') != str(table):
+            continue
+        if priority and rule['priority'] != str(priority):
+            continue
+        if to and rule.get('to') != to:
+            continue
+        break
+    else:
+        return False
+    return True
+
+
+def add_ip_rule(namespace, ip, iif=None, table=None, priority=None, to=None):
+    """Create an IP rule in a namespace
+
+    :param namespace: (string) namespace name
+    :param ip: (string) source IP or CIDR address (IPv4, IPv6)
+    :param iif: (Optional) (string) input interface name
+    :param table: (Optional) (string, int) table number
+    :param priority: (Optional) (string, int) rule priority
+    :param to: (Optional) (string) destination IP or CIDR address (IPv4, IPv6)
+    """
+    ip_version = common_utils.get_ip_version(ip)
+    rules = list_ip_rules(namespace, ip_version)
+    if _exist_ip_rule(rules, ip, iif, table, priority, to):
+        return
+    cmd_args = _make_pyroute2_args(ip, iif, table, priority, to)
+    privileged.add_ip_rule(namespace, **cmd_args)
+
+
+def delete_ip_rule(namespace, ip, iif=None, table=None, priority=None,
+                   to=None):
+    """Delete an IP rule in a namespace
+
+    :param namespace: (string) namespace name
+    :param ip: (string) source IP or CIDR address (IPv4, IPv6)
+    :param iif: (Optional) (string) input interface name
+    :param table: (Optional) (string, int) table number
+    :param priority: (Optional) (string, int) rule priority
+    :param to: (Optional) (string) destination IP or CIDR address (IPv4, IPv6)
+    """
+    cmd_args = _make_pyroute2_args(ip, iif, table, priority, to)
+    privileged.delete_ip_rule(namespace, **cmd_args)
+
+
+def get_attr(pyroute2_obj, attr_name):
+    """Get an attribute from a PyRoute2 object"""
+    rule_attrs = pyroute2_obj.get('attrs', [])
+    for attr in (attr for attr in rule_attrs if attr[0] == attr_name):
+        return attr[1]
+
+
+def _parse_link_device(namespace, device, **kwargs):
+    """Parse pytoute2 link device information
+
+    For each link device, the IP address information is retrieved and returned
+    in a dictionary.
+    IP address scope: http://linux-ip.net/html/tools-ip-address.html
+    """
+    retval = []
+    name = get_attr(device, 'IFLA_IFNAME')
+    ip_addresses = privileged.get_ip_addresses(namespace,
+                                               index=device['index'],
+                                               **kwargs)
+    for ip_address in ip_addresses:
+        ip = get_attr(ip_address, 'IFA_ADDRESS')
+        ip_length = ip_address['prefixlen']
+        cidr = common_utils.ip_to_cidr(ip, prefix=ip_length)
+        flags = get_attr(ip_address, 'IFA_FLAGS')
+        dynamic = not bool(flags & ifaddrmsg.IFA_F_PERMANENT)
+        tentative = bool(flags & ifaddrmsg.IFA_F_TENTATIVE)
+        dadfailed = bool(flags & ifaddrmsg.IFA_F_DADFAILED)
+        scope = IP_ADDRESS_SCOPE[ip_address['scope']]
+        retval.append({'name': name,
+                       'cidr': cidr,
+                       'scope': scope,
+                       'broadcast': get_attr(ip_address, 'IFA_BROADCAST'),
+                       'dynamic': dynamic,
+                       'tentative': tentative,
+                       'dadfailed': dadfailed})
+    return retval
+
+
+def get_devices_with_ip(namespace, name=None, **kwargs):
+    link_args = {}
+    if name:
+        link_args['ifname'] = name
+    devices = privileged.get_link_devices(namespace, **link_args)
+    retval = []
+    for parsed_ips in (_parse_link_device(namespace, device, **kwargs)
+                       for device in devices):
+        retval += parsed_ips
+    return retval
+
+
+def get_devices_info(namespace, **kwargs):
+    devices = privileged.get_link_devices(namespace, **kwargs)
+    retval = []
+    for device in devices:
+        ret = {'index': device['index'],
+               'name': get_attr(device, 'IFLA_IFNAME'),
+               'operstate': get_attr(device, 'IFLA_OPERSTATE'),
+               'linkmode': get_attr(device, 'IFLA_LINKMODE'),
+               'mtu': get_attr(device, 'IFLA_MTU'),
+               'promiscuity': get_attr(device, 'IFLA_PROMISCUITY'),
+               'mac': get_attr(device, 'IFLA_ADDRESS'),
+               'broadcast': get_attr(device, 'IFLA_BROADCAST')}
+        ifla_linkinfo = get_attr(device, 'IFLA_LINKINFO')
+        if ifla_linkinfo:
+            ret['kind'] = get_attr(ifla_linkinfo, 'IFLA_INFO_KIND')
+            ifla_data = get_attr(ifla_linkinfo, 'IFLA_INFO_DATA')
+            if ret['kind'] == 'vxlan':
+                ret['vxlan_id'] = get_attr(ifla_data, 'IFLA_VXLAN_ID')
+                ret['vxlan_group'] = get_attr(ifla_data, 'IFLA_VXLAN_GROUP')
+            elif ret['kind'] == 'vlan':
+                ret['vlan_id'] = get_attr(ifla_data, 'IFLA_VLAN_ID')
+        retval.append(ret)
+
+    return retval
+>>>>>>> e7a2b6d179... Add IPWrapper.get_devices_info using PyRoute2

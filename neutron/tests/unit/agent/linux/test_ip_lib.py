@@ -1809,3 +1809,267 @@ class TestConntrack(base.BaseTestCase):
         device.delete_socket_conntrack_state(ip_str, dport, protocol)
         self.execute.assert_called_once_with(expect_cmd, check_exit_code=True,
                                              extra_ok_codes=[1])
+<<<<<<< HEAD
+=======
+
+
+class ParseIpRuleTestCase(base.BaseTestCase):
+
+    BASE_RULE = {
+        'family': 2, 'dst_len': 0, 'res2': 0, 'tos': 0, 'res1': 0, 'flags': 0,
+        'header': {
+            'pid': 18152, 'length': 44, 'flags': 2, 'error': None, 'type': 32,
+            'sequence_number': 281},
+        'attrs': {'FRA_TABLE': 255, 'FRA_SUPPRESS_PREFIXLEN': 4294967295},
+        'table': 255, 'action': 1, 'src_len': 0, 'event': 'RTM_NEWRULE'}
+
+    def setUp(self):
+        super(ParseIpRuleTestCase, self).setUp()
+        self.rule = copy.deepcopy(self.BASE_RULE)
+
+    def test_parse_priority(self):
+        self.rule['attrs']['FRA_PRIORITY'] = 1000
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('1000', parsed_rule['priority'])
+
+    def test_parse_from_ipv4(self):
+        self.rule['attrs']['FRA_SRC'] = '192.168.0.1'
+        self.rule['src_len'] = 24
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('192.168.0.1/24', parsed_rule['from'])
+
+    def test_parse_from_ipv6(self):
+        self.rule['attrs']['FRA_SRC'] = '2001:db8::1'
+        self.rule['src_len'] = 64
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 6)
+        self.assertEqual('2001:db8::1/64', parsed_rule['from'])
+
+    def test_parse_from_any_ipv4(self):
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('0.0.0.0/0', parsed_rule['from'])
+
+    def test_parse_from_any_ipv6(self):
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 6)
+        self.assertEqual('::/0', parsed_rule['from'])
+
+    def test_parse_to_ipv4(self):
+        self.rule['attrs']['FRA_DST'] = '192.168.10.1'
+        self.rule['dst_len'] = 24
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('192.168.10.1/24', parsed_rule['to'])
+
+    def test_parse_to_ipv6(self):
+        self.rule['attrs']['FRA_DST'] = '2001:db8::1'
+        self.rule['dst_len'] = 64
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 6)
+        self.assertEqual('2001:db8::1/64', parsed_rule['to'])
+
+    def test_parse_to_none(self):
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertIsNone(parsed_rule.get('to'))
+
+    def test_parse_table(self):
+        self.rule['attrs']['FRA_TABLE'] = 255
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('local', parsed_rule['table'])
+        self.rule['attrs']['FRA_TABLE'] = 254
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('main', parsed_rule['table'])
+        self.rule['attrs']['FRA_TABLE'] = 253
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('default', parsed_rule['table'])
+        self.rule['attrs']['FRA_TABLE'] = 1000
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('1000', parsed_rule['table'])
+
+    def test_parse_fwmark(self):
+        self.rule['attrs']['FRA_FWMARK'] = 1000
+        self.rule['attrs']['FRA_FWMASK'] = 10
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('0x3e8/0xa', parsed_rule['fwmark'])
+
+    def test_parse_fwmark_none(self):
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertIsNone(parsed_rule.get('fwmark'))
+
+    def test_parse_iif(self):
+        self.rule['attrs']['FRA_IIFNAME'] = 'input_interface_name'
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('input_interface_name', parsed_rule['iif'])
+
+    def test_parse_iif_none(self):
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertIsNone(parsed_rule.get('iif'))
+
+    def test_parse_oif(self):
+        self.rule['attrs']['FRA_OIFNAME'] = 'output_interface_name'
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertEqual('output_interface_name', parsed_rule['oif'])
+
+    def test_parse_oif_none(self):
+        parsed_rule = ip_lib._parse_ip_rule(self.rule, 4)
+        self.assertIsNone(parsed_rule.get('oif'))
+
+
+class ListIpRulesTestCase(base.BaseTestCase):
+
+    def test_list_ip_rules(self):
+        rule1 = {'family': 2, 'src_len': 24, 'action': 1,
+                 'attrs': {'FRA_SRC': '10.0.0.1', 'FRA_TABLE': 100}}
+        rule2 = {'family': 2, 'src_len': 0, 'action': 6,
+                 'attrs': {'FRA_TABLE': 255}}
+        rules = [rule1, rule2]
+        with mock.patch.object(priv_lib, 'list_ip_rules') as mock_list_rules:
+            mock_list_rules.return_value = rules
+            retval = ip_lib.list_ip_rules(mock.ANY, 4)
+        reference = [
+            {'type': 'unicast', 'from': '10.0.0.1/24', 'priority': '0',
+             'table': '100'},
+            {'type': 'blackhole', 'from': '0.0.0.0/0', 'priority': '0',
+             'table': 'local'}]
+        self.assertEqual(reference, retval)
+
+
+class ParseLinkDeviceTestCase(base.BaseTestCase):
+
+    def setUp(self):
+        super(ParseLinkDeviceTestCase, self).setUp()
+        self._mock_get_ip_addresses = mock.patch.object(priv_lib,
+                                                        'get_ip_addresses')
+        self.mock_get_ip_addresses = self._mock_get_ip_addresses.start()
+        self.addCleanup(self._stop_mock)
+
+    def _stop_mock(self):
+        self._mock_get_ip_addresses.stop()
+
+    def test_parse_link_devices(self):
+        device = ({'index': 1, 'attrs': [['IFLA_IFNAME', 'int_name']]})
+        self.mock_get_ip_addresses.return_value = [
+            {'prefixlen': 24, 'scope': 200, 'attrs': [
+                ['IFA_ADDRESS', '192.168.10.20'],
+                ['IFA_FLAGS', ifaddrmsg.IFA_F_PERMANENT]]},
+            {'prefixlen': 64, 'scope': 200, 'attrs': [
+                ['IFA_ADDRESS', '2001:db8::1'],
+                ['IFA_FLAGS', ifaddrmsg.IFA_F_PERMANENT]]}]
+
+        retval = ip_lib._parse_link_device('namespace', device)
+        expected = [{'scope': 'site', 'cidr': '192.168.10.20/24',
+                     'dynamic': False, 'dadfailed': False, 'name': 'int_name',
+                     'broadcast': None, 'tentative': False},
+                    {'scope': 'site', 'cidr': '2001:db8::1/64',
+                     'dynamic': False, 'dadfailed': False, 'name': 'int_name',
+                     'broadcast': None, 'tentative': False}]
+        self.assertEqual(expected, retval)
+
+
+class GetDevicesInfoTestCase(base.BaseTestCase):
+
+    DEVICE_LO = {
+        'index': 2,
+        'attrs': (('IFLA_IFNAME', 'lo'), ('IFLA_OPERSTATE', 'UP'),
+                  ('IFLA_LINKMODE', 0), ('IFLA_MTU', 1000),
+                  ('IFLA_PROMISCUITY', 0),
+                  ('IFLA_ADDRESS', '5a:76:ed:cc:ce:90'),
+                  ('IFLA_BROADCAST', 'ff:ff:ff:ff:ff:f0'), )
+    }
+
+    DEVICE_DUMMY = {
+        'index': 2,
+        'attrs': (('IFLA_IFNAME', 'int_01'), ('IFLA_OPERSTATE', 'DOWN'),
+                  ('IFLA_LINKMODE', 0), ('IFLA_MTU', 1500),
+                  ('IFLA_PROMISCUITY', 0),
+                  ('IFLA_ADDRESS', '5a:76:ed:cc:ce:90'),
+                  ('IFLA_BROADCAST', 'ff:ff:ff:ff:ff:f0'),
+                  ('IFLA_LINKINFO', {
+                      'attrs': (('IFLA_INFO_KIND', 'dummy'), )}))
+    }
+    DEVICE_VLAN = {
+        'index': 5,
+        'attrs': (('IFLA_IFNAME', 'int_02'), ('IFLA_OPERSTATE', 'DOWN'),
+                  ('IFLA_LINKMODE', 0), ('IFLA_MTU', 1400),
+                  ('IFLA_PROMISCUITY', 0),
+                  ('IFLA_ADDRESS', '5a:76:ed:cc:ce:91'),
+                  ('IFLA_BROADCAST', 'ff:ff:ff:ff:ff:f1'),
+                  ('IFLA_LINKINFO', {'attrs': (
+                      ('IFLA_INFO_KIND', 'vlan'),
+                      ('IFLA_INFO_DATA', {'attrs': (('IFLA_VLAN_ID', 1000), )})
+                  )}))
+    }
+    DEVICE_VXLAN = {
+        'index': 9,
+        'attrs': (('IFLA_IFNAME', 'int_03'), ('IFLA_OPERSTATE', 'UP'),
+                  ('IFLA_LINKMODE', 0), ('IFLA_MTU', 1300),
+                  ('IFLA_PROMISCUITY', 0),
+                  ('IFLA_ADDRESS', '5a:76:ed:cc:ce:92'),
+                  ('IFLA_BROADCAST', 'ff:ff:ff:ff:ff:f2'),
+                  ('IFLA_LINKINFO', {'attrs': (
+                      ('IFLA_INFO_KIND', 'vxlan'),
+                      ('IFLA_INFO_DATA', {'attrs': (
+                          ('IFLA_VXLAN_ID', 1001),
+                          ('IFLA_VXLAN_GROUP', '239.1.1.1'))})
+                  )}))
+    }
+
+    def setUp(self):
+        super(GetDevicesInfoTestCase, self).setUp()
+        self.mock_getdevs = mock.patch.object(priv_lib,
+                                              'get_link_devices').start()
+
+    def test_get_devices_info_lo(self):
+        self.mock_getdevs.return_value = (self.DEVICE_LO, )
+        ret = ip_lib.get_devices_info('namespace')
+        expected = {'index': 2,
+                    'name': 'lo',
+                    'operstate': 'UP',
+                    'linkmode': 0,
+                    'mtu': 1000,
+                    'promiscuity': 0,
+                    'mac': '5a:76:ed:cc:ce:90',
+                    'broadcast': 'ff:ff:ff:ff:ff:f0'}
+        self.assertEqual(expected, ret[0])
+
+    def test_get_devices_info_dummy(self):
+        self.mock_getdevs.return_value = (self.DEVICE_DUMMY, )
+        ret = ip_lib.get_devices_info('namespace')
+        expected = {'index': 2,
+                    'name': 'int_01',
+                    'operstate': 'DOWN',
+                    'linkmode': 0,
+                    'mtu': 1500,
+                    'promiscuity': 0,
+                    'mac': '5a:76:ed:cc:ce:90',
+                    'broadcast': 'ff:ff:ff:ff:ff:f0',
+                    'kind': 'dummy'}
+        self.assertEqual(expected, ret[0])
+
+    def test_get_devices_info_vlan(self):
+        self.mock_getdevs.return_value = (self.DEVICE_VLAN, )
+        ret = ip_lib.get_devices_info('namespace')
+        expected = {'index': 5,
+                    'name': 'int_02',
+                    'operstate': 'DOWN',
+                    'linkmode': 0,
+                    'mtu': 1400,
+                    'promiscuity': 0,
+                    'mac': '5a:76:ed:cc:ce:91',
+                    'broadcast': 'ff:ff:ff:ff:ff:f1',
+                    'kind': 'vlan',
+                    'vlan_id': 1000}
+        self.assertEqual(expected, ret[0])
+
+    def test_get_devices_info_vxlan(self):
+        self.mock_getdevs.return_value = (self.DEVICE_VXLAN, )
+        ret = ip_lib.get_devices_info('namespace')
+        expected = {'index': 9,
+                    'name': 'int_03',
+                    'operstate': 'UP',
+                    'linkmode': 0,
+                    'mtu': 1300,
+                    'promiscuity': 0,
+                    'mac': '5a:76:ed:cc:ce:92',
+                    'broadcast': 'ff:ff:ff:ff:ff:f2',
+                    'kind': 'vxlan',
+                    'vxlan_id': 1001,
+                    'vxlan_group': '239.1.1.1'}
+        self.assertEqual(expected, ret[0])
+>>>>>>> e7a2b6d179... Add IPWrapper.get_devices_info using PyRoute2
